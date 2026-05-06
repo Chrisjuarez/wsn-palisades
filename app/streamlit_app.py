@@ -177,7 +177,12 @@ def page_live():
         dsm_uri,
         dtm_uri,
     )
-    from wsn_palisades.optimizers import greedy_select, random_select
+    from wsn_palisades.optimizers import (
+        greedy_select,
+        nsga_select,
+        random_select,
+        simple_nsga_select,
+    )
     from wsn_palisades.params import SensorParams, SolarParams
     from wsn_palisades.surfaces import DEMManager, warp_surfaces_to_utm
 
@@ -261,6 +266,16 @@ def page_live():
         }[mode_label]
         K = st.number_input("K (sensors)", min_value=5, max_value=80, value=20)
 
+        run_nsga = st.checkbox(
+            "Also run NSGA-III (slower, +2-5 min)",
+            value=False,
+            help=(
+                "When checked, also runs simple-NSGA-III and seeded-NSGA-III with reduced "
+                "budgets so the run completes on Streamlit Cloud's free tier. The bundled "
+                "Explore Results page shows full-budget NSGA results."
+            ),
+        )
+
         run_disabled = (
             aoi is None
             or (area_km2 is not None and area_km2 > 2.0)
@@ -313,20 +328,62 @@ def page_live():
             grid_size=20, cov_grid_size=40, n_jobs=2,
             solar_params=solar, verbose=False,
         )
-        g = greedy_select(packs, int(K), SP)
-        r_res = random_select(packs, int(K), SP)
 
-    st.success(f"Done — mode `{mode_label}`, K={int(K)}.")
-    cmp = pd.DataFrame(
-        [
-            {"optimizer": "Random", "coverage_pct": r_res["coverage_pct"], "gamma_mean": r_res["gamma_mean"], "d_mean_m": r_res["d_mean_m"], "solar_mean": r_res["solar_mean"]},
-            {"optimizer": "Greedy", "coverage_pct": g["coverage_pct"], "gamma_mean": g["gamma_mean"], "d_mean_m": g["d_mean_m"], "solar_mean": g["solar_mean"]},
-        ]
-    )
-    st.dataframe(cmp, use_container_width=True)
+    # Always run the cheap two
+    placements: dict[str, dict] = {}
+    with st.spinner("Running Random + Greedy..."):
+        placements["Random"] = random_select(packs, int(K), SP)
+        placements["Greedy"] = greedy_select(packs, int(K), SP)
 
-    # Render greedy placement on the map
+    # NSGA path is opt-in and uses reduced budgets so cloud-tier runs finish.
+    if run_nsga:
+        with st.spinner("Running simple-NSGA-III (reduced budget)..."):
+            placements["Simple-NSGA"] = simple_nsga_select(
+                packs, int(K), SP,
+                max_gen=80, partitions=6, pop_mult=1.5,
+                use_threads=True, n_threads=2,
+            )
+        with st.spinner("Running seeded-NSGA-III (reduced budget)..."):
+            placements["Seeded-NSGA"] = nsga_select(
+                packs, int(K), SP,
+                max_gen=120, partitions=6, pop_mult=1.5,
+                multi_seed=False,  # skip the multi-greedy seeding sweep for speed
+                use_threads=True, n_threads=2,
+            )
+
+    st.success(f"Done — mode `{mode_label}`, K={int(K)}, {len(placements)} optimizers.")
+
+    # Comparison table -----------------------------------------------------
+    rows = [
+        {
+            "optimizer": name,
+            "coverage_pct": res["coverage_pct"],
+            "gamma_mean": res["gamma_mean"],
+            "d_mean_m": res["d_mean_m"],
+            "solar_mean": res["solar_mean"],
+        }
+        for name, res in placements.items()
+    ]
+    st.dataframe(pd.DataFrame(rows), use_container_width=True)
+
+    # Map dropdown ---------------------------------------------------------
     cands = packs["candidates"]
+    pick = st.selectbox(
+        "Show placement on map",
+        list(placements.keys()),
+        index=list(placements.keys()).index("Greedy"),
+    )
+    chosen = placements[pick]
+
+    # Color by optimizer for quick recognition
+    colors = {
+        "Random": "#7F7F7F",
+        "Greedy": "#F58518",
+        "Simple-NSGA": "#54A24B",
+        "Seeded-NSGA": "#4C78A8",
+    }
+    color = colors.get(pick, "#F58518")
+
     m2 = folium.Map(
         location=(aoi.centroid.y, aoi.centroid.x), zoom_start=15,
         tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
@@ -336,14 +393,14 @@ def page_live():
         locations=[(c[1], c[0]) for c in aoi.exterior.coords],
         color="#FFFFFF", weight=3, fill=False,
     ).add_to(m2)
-    for rank, idx in enumerate(g["idxs"], start=1):
+    for rank, idx in enumerate(chosen["idxs"], start=1):
         lon, lat = cands[int(idx)]
         folium.CircleMarker(
-            location=(lat, lon), radius=6, color="#F58518",
-            fill=True, fill_color="#F58518", fill_opacity=0.9, weight=1,
-            popup=f"Greedy rank {rank}",
+            location=(lat, lon), radius=6, color=color,
+            fill=True, fill_color=color, fill_opacity=0.9, weight=1,
+            popup=f"{pick} rank {rank}",
         ).add_to(m2)
-    st.write(f"**Greedy placement — {mode_label}**")
+    st.write(f"**{pick} placement — {mode_label}**")
     st_folium(m2, width=900, height=460, returned_objects=[])
 
 
