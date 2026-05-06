@@ -1,0 +1,91 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wsn-palisades"
+version = "0.1.0"
+description = "Terrain-, vegetation-, and solar-aware NSGA-III sensor placement for wireless sensor networks (Palisades / Eaton case studies)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+    { name = "Chris Juarez", email = "chrisjuarez1596@gmail.com" },
+]
+keywords = ["wsn", "sensor-placement", "nsga-iii", "pymoo", "geospatial", "lidar", "optimization"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: GIS",
+]
+
+dependencies = [
+    # core scientific stack
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "scipy>=1.11",
+    "matplotlib>=3.8",
+
+    # geospatial
+    "rasterio>=1.3",
+    "shapely>=2.0",
+    "pyproj>=3.6",
+    "affine>=2.4",
+    "geopy>=2.4",
+
+    # solar / weather
+    "pvlib>=0.10",
+
+    # optimization
+    "pymoo>=0.6",
+
+    # parallelism
+    "joblib>=1.3",
+    "loky>=3.4",
+    "tqdm>=4.66",
+
+    # interactive maps + widgets
+    "ipyleaflet>=0.18",
+    "ipywidgets>=8.1",
+    "folium>=0.15",
+    "plotly>=5.18",
+
+    # IO helpers
+    "openpyxl>=3.1",            # for reading the analysis xlsx
+    "python-dotenv>=1.0",
+    "boto3>=1.34",              # S3 fetch for rasters
+
+    # web app
+    "streamlit>=1.32",
+    "streamlit-folium>=0.18",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=4.1",
+    "ruff>=0.4",
+    "jupyter>=1.0",
+    "nbconvert>=7.16",
+]
+
+[project.urls]
+Repository = "https://github.com/chrisjuarez/wsn-palisades"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+extend-exclude = ["notebooks/**", "data/**"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

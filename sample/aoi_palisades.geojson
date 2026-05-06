@@ -1,0 +1,17 @@
+{
+  "type": "Feature",
+  "properties": {
+    "name": "Pacific Palisades sample AOI",
+    "notes": "Approximate ~5 km^2 box used for the Palisades canonical run."
+  },
+  "geometry": {
+    "type": "Polygon",
+    "coordinates": [[
+      [-118.555, 34.045],
+      [-118.510, 34.045],
+      [-118.510, 34.075],
+      [-118.555, 34.075],
+      [-118.555, 34.045]
+    ]]
+  }
+}

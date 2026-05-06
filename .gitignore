@@ -1,0 +1,62 @@
+# Data files (fetched via scripts/fetch_data.py from S3)
+data/*
+!data/README.md
+*.tif
+*.tiff
+*.tif.aux.xml
+
+# Generated artifacts
+*.pkl
+*.pkl.gz
+*.joblib
+*.zip
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Matplotlib cache
+.mpl-cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Office lock files
+~$*
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Secrets / env
+.env
+.env.local
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Node (in case any leak in)
+node_modules/
+
+# Allow keeping curated small results
+!results/
+!results/**
