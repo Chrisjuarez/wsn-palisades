@@ -23,8 +23,54 @@ from shapely.ops import transform as shapely_transform
 from .params import SensorParams
 
 
+# Fallback EPSGs to try when rasterio reports a ``LOCAL_CS`` / unrecognised CRS.
+# The Palisades rasters are tagged NAD83(2011) / UTM zone 11N (EPSG:6340).
+# Older PROJ DBs (e.g. on Streamlit Cloud) fail to resolve that and surface
+# the CRS as ``LOCAL_CS``, which pyproj cannot transform from.
+#   - 6340: NAD83(2011) / UTM 11N — the original raster CRS (best fidelity)
+#   - 32611: WGS84 / UTM 11N — universally available, sub-meter offset from 6340
+DEFAULT_FALLBACK_EPSGS = (6340, 32611)
+
+
 def _is_s3(path: str) -> bool:
     return isinstance(path, str) and path.startswith("s3://")
+
+
+def _try_make_transformer(crs) -> bool:
+    """Return True iff pyproj can build an EPSG:4326 -> ``crs`` transformer."""
+    try:
+        Transformer.from_crs("EPSG:4326", crs, always_xy=True)
+        return True
+    except Exception:
+        return False
+
+
+def _resolve_crs(raster_crs, fallback_epsgs=DEFAULT_FALLBACK_EPSGS):
+    """Return a CRS that pyproj can definitely transform from EPSG:4326.
+
+    If ``raster_crs`` is missing, unrecognised (``LOCAL_CS``), or otherwise
+    unusable on this host's PROJ database, walk the fallback list and return
+    the first that works. Raises if none do.
+    """
+    # Try the raster's own CRS first
+    if raster_crs is not None:
+        try:
+            if hasattr(raster_crs, "to_epsg") and raster_crs.to_epsg():
+                if _try_make_transformer(raster_crs):
+                    return raster_crs
+        except Exception:
+            pass
+
+    # Fall back to a known-good EPSG
+    for epsg in fallback_epsgs:
+        candidate = rasterio.crs.CRS.from_epsg(epsg)
+        if _try_make_transformer(candidate):
+            return candidate
+
+    raise RuntimeError(
+        f"No usable CRS for this raster. Original={raster_crs!r}, "
+        f"tried fallbacks {fallback_epsgs}. PROJ database may be too old."
+    )
 
 
 def _path_exists(path: str) -> bool:
@@ -60,35 +106,12 @@ def _rio_env(path: str):
 def reproject_aoi_to_raster(aoi_poly: Polygon, raster_crs) -> Polygon:
     """Project a WGS84 lon/lat polygon into the raster's CRS.
 
-    Resilient to ``raster_crs`` arriving as a rasterio.CRS, pyproj.CRS,
-    EPSG int, or a WKT/PROJ string. Raises with a useful message if pyproj
-    can't build the transformer (e.g. missing PROJ data on the host).
+    Callers should pass a CRS already vetted by ``_resolve_crs`` so this
+    function doesn't have to defend against unrecognised CRS objects.
     """
     if raster_crs is None:
         return aoi_poly
-
-    # Normalise to a form pyproj definitely accepts.
-    target = None
-    for getter in ("to_epsg", "to_wkt", "to_proj4"):
-        if hasattr(raster_crs, getter):
-            try:
-                val = getattr(raster_crs, getter)()
-                if val:
-                    target = f"EPSG:{val}" if getter == "to_epsg" else val
-                    break
-            except Exception:
-                continue
-    if target is None:
-        target = raster_crs  # last-ditch — let pyproj try the original object
-
-    try:
-        project = Transformer.from_crs("EPSG:4326", target, always_xy=True).transform
-    except Exception as e:
-        raise RuntimeError(
-            f"Could not build transformer EPSG:4326 -> {target!r}: {e}. "
-            "If the raster is on S3, make sure it's a Cloud-Optimized GeoTIFF "
-            "with a CRS that pyproj's bundled PROJ database understands."
-        ) from e
+    project = Transformer.from_crs("EPSG:4326", raster_crs, always_xy=True).transform
     return shapely_transform(project, aoi_poly)
 
 
@@ -190,11 +213,12 @@ class DEMManager:
 
     def _load_dtm_file(self, path: str, aoi_poly: Polygon) -> None:
         with _rio_env(path), rasterio.open(path) as src:
-            aoi_proj = reproject_aoi_to_raster(aoi_poly, src.crs)
+            crs = _resolve_crs(src.crs)
+            aoi_proj = reproject_aoi_to_raster(aoi_poly, crs)
             arr, tr = rio_mask(src, [mapping(aoi_proj)], crop=True)
             self.dem_array = arr[0]
             self.transform = tr
-            self.crs = src.crs
+            self.crs = crs
             self.profile = src.profile
             nodata = src.nodata if src.nodata is not None else -999999.0
         self.dem_array = np.where(
@@ -209,11 +233,12 @@ class DEMManager:
 
     def _load_dsm_file(self, path: str, aoi_poly: Polygon) -> None:
         with _rio_env(path), rasterio.open(path) as src:
-            aoi_proj = reproject_aoi_to_raster(aoi_poly, src.crs)
+            crs = _resolve_crs(src.crs)
+            aoi_proj = reproject_aoi_to_raster(aoi_poly, crs)
             arr, tr = rio_mask(src, [mapping(aoi_proj)], crop=True)
             self.dsm_array = arr[0]
             self.dsm_transform = tr
-            self.dsm_crs = src.crs
+            self.dsm_crs = crs
             nodata = src.nodata if src.nodata is not None else -999999.0
         self.dsm_array = np.where(
             (self.dsm_array == nodata) | (self.dsm_array < -1000), np.nan, self.dsm_array
@@ -221,11 +246,12 @@ class DEMManager:
 
     def _load_chm_file(self, path: str, aoi_poly: Polygon) -> None:
         with _rio_env(path), rasterio.open(path) as src:
-            aoi_proj = reproject_aoi_to_raster(aoi_poly, src.crs)
+            crs = _resolve_crs(src.crs)
+            aoi_proj = reproject_aoi_to_raster(aoi_poly, crs)
             arr, tr = rio_mask(src, [mapping(aoi_proj)], crop=True)
             self.chm_array = arr[0]
             self.chm_transform = tr
-            self.chm_crs = src.crs
+            self.chm_crs = crs
             nodata = src.nodata if src.nodata is not None else -999999.0
         self.chm_array = np.where(
             (self.chm_array == nodata) | (self.chm_array < -1000), np.nan, self.chm_array

@@ -46,6 +46,12 @@ PALISADES_CENTER: Final[tuple[float, float]] = (
     (PALISADES_BOUNDS[0] + PALISADES_BOUNDS[2]) / 2,  # lon
 )
 
+# The Palisades rasters are tagged NAD83(2011) / UTM zone 11N (EPSG:6340).
+# Older PROJ databases (e.g. Streamlit Cloud's) lose this on read and surface
+# the CRS as a useless ``LOCAL_CS`` WKT, so we substitute the canonical EPSG
+# code in ``surfaces.py``. The pixel data and transforms are unchanged.
+PALISADES_RASTER_EPSG: Final[int] = 6340
+
 
 __all__ = [
     "DEFAULT_BUCKET",
@@ -55,4 +61,5 @@ __all__ = [
     "chm_uri",
     "PALISADES_BOUNDS",
     "PALISADES_CENTER",
+    "PALISADES_RASTER_EPSG",
 ]
