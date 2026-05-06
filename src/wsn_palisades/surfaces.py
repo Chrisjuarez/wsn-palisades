@@ -35,21 +35,60 @@ def _path_exists(path: str) -> bool:
 
 
 def _rio_env(path: str):
-    """rasterio.Env tuned for the path: anonymous + range-request friendly for s3, no-op for local."""
+    """rasterio.Env tuned for the path.
+
+    For s3://, enables anonymous reads and range-request friendly settings.
+    For all paths, sets GTIFF_SRS_SOURCE=EPSG so GDAL uses the canonical
+    EPSG definition when a GeoTIFF's embedded WKT slightly differs from
+    the registry (which is the case for our Palisades rasters tagged
+    EPSG:6340 / NAD83(2011) UTM 11N).
+    """
+    common = {"GTIFF_SRS_SOURCE": "EPSG"}
     if _is_s3(path):
         return rasterio.Env(
             AWS_NO_SIGN_REQUEST="YES",
             GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR",
             CPL_VSIL_CURL_USE_HEAD="NO",
+            **common,
         )
-    return contextlib.nullcontext()
+    return rasterio.Env(**common)
 
 
 # -- AOI helpers --------------------------------------------------------------
 
 
 def reproject_aoi_to_raster(aoi_poly: Polygon, raster_crs) -> Polygon:
-    project = Transformer.from_crs("EPSG:4326", raster_crs, always_xy=True).transform
+    """Project a WGS84 lon/lat polygon into the raster's CRS.
+
+    Resilient to ``raster_crs`` arriving as a rasterio.CRS, pyproj.CRS,
+    EPSG int, or a WKT/PROJ string. Raises with a useful message if pyproj
+    can't build the transformer (e.g. missing PROJ data on the host).
+    """
+    if raster_crs is None:
+        return aoi_poly
+
+    # Normalise to a form pyproj definitely accepts.
+    target = None
+    for getter in ("to_epsg", "to_wkt", "to_proj4"):
+        if hasattr(raster_crs, getter):
+            try:
+                val = getattr(raster_crs, getter)()
+                if val:
+                    target = f"EPSG:{val}" if getter == "to_epsg" else val
+                    break
+            except Exception:
+                continue
+    if target is None:
+        target = raster_crs  # last-ditch — let pyproj try the original object
+
+    try:
+        project = Transformer.from_crs("EPSG:4326", target, always_xy=True).transform
+    except Exception as e:
+        raise RuntimeError(
+            f"Could not build transformer EPSG:4326 -> {target!r}: {e}. "
+            "If the raster is on S3, make sure it's a Cloud-Optimized GeoTIFF "
+            "with a CRS that pyproj's bundled PROJ database understands."
+        ) from e
     return shapely_transform(project, aoi_poly)
 
 
