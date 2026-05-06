@@ -120,6 +120,13 @@ def page_explore():
         1, int(K), int(K), 1,
     )
 
+    cc1, cc2 = st.columns([1, 3])
+    show_range = cc1.checkbox("Show coverage range", value=True)
+    range_m = cc2.slider(
+        "Sensor range (m)", min_value=50, max_value=600, value=300, step=25,
+        help="Radius of the coverage halo drawn around each sensor.",
+    )
+
     tab_map, tab_pareto, tab_lines = st.tabs(["Map", "Pareto", "Metric vs K"])
 
     with tab_map:
@@ -129,6 +136,7 @@ def page_explore():
                 aoi, res, scenario=scen, K=int(K),
                 optimizer_key=opt_key, n_sensors=int(n_sensors),
                 grid_size=30,
+                range_m=float(range_m), show_range=bool(show_range),
             )
             st_folium(fmap, width=900, height=560, returned_objects=[])
         except ImportError:
@@ -283,75 +291,109 @@ def page_live():
         )
         run = st.button("Run", disabled=run_disabled)
 
-    if not run or aoi is None:
+    # ------------------------------------------------------------------
+    # 1. Run pipeline (only when "Run" was just clicked) and stash results
+    # ------------------------------------------------------------------
+    if run and aoi is not None:
+        with st.spinner(f"Streaming {mode_key.upper()} from S3 and computing visibility..."):
+            # FLAT mode synthesizes a constant-elevation DEM over the AOI; no S3 fetch.
+            # DEM mode streams just the DTM.
+            # DSM/CHM streams DTM + DSM + CHM (each as a small AOI window over HTTP).
+            if mode_key == "flat":
+                import numpy as np
+
+                from rasterio.io import MemoryFile
+                from rasterio.transform import from_bounds
+
+                minx, miny, maxx, maxy = aoi.bounds
+                w_px, h_px = 256, 256
+                elev = np.zeros((h_px, w_px), dtype=np.float32)
+                tr = from_bounds(minx, miny, maxx, maxy, w_px, h_px)
+                with MemoryFile() as mem:
+                    with mem.open(
+                        driver="GTiff", width=w_px, height=h_px, count=1,
+                        dtype="float32", crs="EPSG:4326", transform=tr, nodata=-9999,
+                    ) as dst:
+                        dst.write(elev, 1)
+                    dem_bytes = mem.read()
+                dmgr = DEMManager(dem_bytes)
+            else:
+                dsm_path = dsm_uri() if mode_key == "dsm_chm" else None
+                chm_path = chm_uri() if mode_key == "dsm_chm" else None
+                dmgr = DEMManager.from_files(
+                    aoi_poly=aoi,
+                    dtm_path=dtm_uri(),
+                    dsm_path=dsm_path,
+                    chm_path=chm_path,
+                )
+
+            dmgr.calculate_slope_and_aspect()
+            warp_surfaces_to_utm(dmgr, aoi, target_res_m=2.0)
+
+            SP = SensorParams(R_m=300.0, az_step_deg=2, min_sep_m=200.0)
+            solar = SolarParams()
+            packs = precompute_scenario_loky(
+                aoi, dmgr, mode_key if mode_key != "flat" else "dem", SP,
+                grid_size=20, cov_grid_size=40, n_jobs=2,
+                solar_params=solar, verbose=False,
+            )
+
+        placements: dict[str, dict] = {}
+        with st.spinner("Running Random + Greedy..."):
+            placements["Random"] = random_select(packs, int(K), SP)
+            placements["Greedy"] = greedy_select(packs, int(K), SP)
+
+        # NSGA is opt-in and uses reduced budgets so cloud-tier runs finish.
+        if run_nsga:
+            with st.spinner("Running simple-NSGA-III (reduced budget)..."):
+                placements["Simple-NSGA"] = simple_nsga_select(
+                    packs, int(K), SP,
+                    max_gen=80, partitions=6, pop_mult=1.5,
+                    use_threads=True, n_threads=2,
+                )
+            with st.spinner("Running seeded-NSGA-III (reduced budget)..."):
+                placements["Seeded-NSGA"] = nsga_select(
+                    packs, int(K), SP,
+                    max_gen=120, partitions=6, pop_mult=1.5,
+                    multi_seed=False,  # skip the multi-greedy seeding sweep for speed
+                    use_threads=True, n_threads=2,
+                )
+
+        # Stash everything the renderer needs. Don't store packs (huge); only
+        # the candidate coordinates.
+        st.session_state["live_aoi_results"] = {
+            "placements": placements,
+            "candidates": [
+                (float(c[0]), float(c[1])) for c in packs["candidates"]
+            ],
+            "aoi_exterior": [
+                (float(x), float(y)) for x, y in aoi.exterior.coords
+            ],
+            "aoi_centroid": (float(aoi.centroid.y), float(aoi.centroid.x)),
+            "mode_label": mode_label,
+            "K": int(K),
+            "range_m": float(SP.R_m),
+        }
+
+    # ------------------------------------------------------------------
+    # 2. Render whatever's currently in session_state.
+    # ------------------------------------------------------------------
+    results = st.session_state.get("live_aoi_results")
+    if not results:
         return
 
-    with st.spinner(f"Streaming {mode_key.upper()} from S3 and computing visibility..."):
-        # FLAT mode synthesizes a constant-elevation DEM over the AOI; no S3 fetch.
-        # DEM mode streams just the DTM.
-        # DSM/CHM streams DTM + DSM + CHM (each as a small AOI window over HTTP).
-        if mode_key == "flat":
-            import numpy as np
+    placements = results["placements"]
+    cands = results["candidates"]
+    aoi_exterior = results["aoi_exterior"]
+    aoi_centroid = results["aoi_centroid"]
+    mode_label_r = results["mode_label"]
+    K_r = results["K"]
+    range_m = float(results.get("range_m", 300.0))
 
-            from rasterio.io import MemoryFile
-            from rasterio.transform import from_bounds
-
-            minx, miny, maxx, maxy = aoi.bounds
-            w_px, h_px = 256, 256
-            elev = np.zeros((h_px, w_px), dtype=np.float32)
-            tr = from_bounds(minx, miny, maxx, maxy, w_px, h_px)
-            with MemoryFile() as mem:
-                with mem.open(
-                    driver="GTiff", width=w_px, height=h_px, count=1,
-                    dtype="float32", crs="EPSG:4326", transform=tr, nodata=-9999,
-                ) as dst:
-                    dst.write(elev, 1)
-                dem_bytes = mem.read()
-            dmgr = DEMManager(dem_bytes)
-        else:
-            dsm_path = dsm_uri() if mode_key == "dsm_chm" else None
-            chm_path = chm_uri() if mode_key == "dsm_chm" else None
-            dmgr = DEMManager.from_files(
-                aoi_poly=aoi,
-                dtm_path=dtm_uri(),
-                dsm_path=dsm_path,
-                chm_path=chm_path,
-            )
-
-        dmgr.calculate_slope_and_aspect()
-        warp_surfaces_to_utm(dmgr, aoi, target_res_m=2.0)
-
-        SP = SensorParams(R_m=300.0, az_step_deg=2, min_sep_m=200.0)
-        solar = SolarParams()
-        packs = precompute_scenario_loky(
-            aoi, dmgr, mode_key if mode_key != "flat" else "dem", SP,
-            grid_size=20, cov_grid_size=40, n_jobs=2,
-            solar_params=solar, verbose=False,
-        )
-
-    # Always run the cheap two
-    placements: dict[str, dict] = {}
-    with st.spinner("Running Random + Greedy..."):
-        placements["Random"] = random_select(packs, int(K), SP)
-        placements["Greedy"] = greedy_select(packs, int(K), SP)
-
-    # NSGA path is opt-in and uses reduced budgets so cloud-tier runs finish.
-    if run_nsga:
-        with st.spinner("Running simple-NSGA-III (reduced budget)..."):
-            placements["Simple-NSGA"] = simple_nsga_select(
-                packs, int(K), SP,
-                max_gen=80, partitions=6, pop_mult=1.5,
-                use_threads=True, n_threads=2,
-            )
-        with st.spinner("Running seeded-NSGA-III (reduced budget)..."):
-            placements["Seeded-NSGA"] = nsga_select(
-                packs, int(K), SP,
-                max_gen=120, partitions=6, pop_mult=1.5,
-                multi_seed=False,  # skip the multi-greedy seeding sweep for speed
-                use_threads=True, n_threads=2,
-            )
-
-    st.success(f"Done — mode `{mode_label}`, K={int(K)}, {len(placements)} optimizers.")
+    st.success(
+        f"Showing last run — mode `{mode_label_r}`, K={K_r}, "
+        f"{len(placements)} optimizers. Click **Run** again to refresh."
+    )
 
     # Comparison table -----------------------------------------------------
     rows = [
@@ -366,12 +408,16 @@ def page_live():
     ]
     st.dataframe(pd.DataFrame(rows), use_container_width=True)
 
-    # Map dropdown ---------------------------------------------------------
-    cands = packs["candidates"]
-    pick = st.selectbox(
+    # Map dropdown + range toggle -----------------------------------------
+    sel_col, range_col = st.columns([2, 1])
+    pick = sel_col.selectbox(
         "Show placement on map",
         list(placements.keys()),
-        index=list(placements.keys()).index("Greedy"),
+        index=list(placements.keys()).index("Greedy") if "Greedy" in placements else 0,
+        key="live_aoi_pick",
+    )
+    show_range_live = range_col.checkbox(
+        f"Show range ({range_m:.0f} m)", value=True, key="live_aoi_show_range",
     )
     chosen = placements[pick]
 
@@ -385,23 +431,29 @@ def page_live():
     color = colors.get(pick, "#F58518")
 
     m2 = folium.Map(
-        location=(aoi.centroid.y, aoi.centroid.x), zoom_start=15,
+        location=aoi_centroid, zoom_start=15,
         tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
         attr="Esri",
     )
     folium.Polygon(
-        locations=[(c[1], c[0]) for c in aoi.exterior.coords],
+        locations=[(y, x) for x, y in aoi_exterior],
         color="#FFFFFF", weight=3, fill=False,
     ).add_to(m2)
     for rank, idx in enumerate(chosen["idxs"], start=1):
         lon, lat = cands[int(idx)]
+        if show_range_live:
+            folium.Circle(
+                location=(lat, lon), radius=range_m,
+                color=color, weight=1.5,
+                fill=True, fill_color=color, fill_opacity=0.10, opacity=0.55,
+            ).add_to(m2)
         folium.CircleMarker(
             location=(lat, lon), radius=6, color=color,
             fill=True, fill_color=color, fill_opacity=0.9, weight=1,
-            popup=f"{pick} rank {rank}",
+            popup=f"{pick} rank {rank} — range {range_m:.0f} m",
         ).add_to(m2)
-    st.write(f"**{pick} placement — {mode_label}**")
-    st_folium(m2, width=900, height=460, returned_objects=[])
+    st.write(f"**{pick} placement — {mode_label_r}**")
+    st_folium(m2, width=900, height=460, returned_objects=[], key="live_aoi_result_map")
 
 
 # ============================================================================
