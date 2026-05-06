@@ -1,7 +1,13 @@
-"""Raster surfaces: DTM/DSM/CHM loading, UTM reprojection, and bilinear sampling."""
+"""Raster surfaces: DTM/DSM/CHM loading, UTM reprojection, and bilinear sampling.
+
+Supports both local file paths and ``s3://bucket/key`` URIs. Public-read S3
+buckets are accessed anonymously via ``AWS_NO_SIGN_REQUEST=YES`` so the app
+needs no AWS credentials at runtime.
+"""
 
 from __future__ import annotations
 
+import contextlib
 import os
 from typing import Optional, Tuple
 
@@ -15,6 +21,28 @@ from shapely.geometry import Polygon, box, mapping
 from shapely.ops import transform as shapely_transform
 
 from .params import SensorParams
+
+
+def _is_s3(path: str) -> bool:
+    return isinstance(path, str) and path.startswith("s3://")
+
+
+def _path_exists(path: str) -> bool:
+    """os.path.exists that also returns True for s3:// URIs (existence is verified at open time)."""
+    if _is_s3(path):
+        return True  # rasterio.open will raise if the key is missing
+    return os.path.exists(path)
+
+
+def _rio_env(path: str):
+    """rasterio.Env tuned for the path: anonymous + range-request friendly for s3, no-op for local."""
+    if _is_s3(path):
+        return rasterio.Env(
+            AWS_NO_SIGN_REQUEST="YES",
+            GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR",
+            CPL_VSIL_CURL_USE_HEAD="NO",
+        )
+    return contextlib.nullcontext()
 
 
 # -- AOI helpers --------------------------------------------------------------
@@ -112,17 +140,17 @@ class DEMManager:
         dsm_path: Optional[str] = None,
         chm_path: Optional[str] = None,
     ) -> "DEMManager":
-        """Load DTM/DSM/CHM from local GeoTIFFs, masking each to the AOI."""
+        """Load DTM/DSM/CHM from local GeoTIFFs **or s3:// URIs**, masking each to the AOI."""
         dm = cls()
         dm._load_dtm_file(dtm_path, aoi_poly)
-        if dsm_path and os.path.exists(dsm_path):
+        if dsm_path and _path_exists(dsm_path):
             dm._load_dsm_file(dsm_path, aoi_poly)
-        if chm_path and os.path.exists(chm_path):
+        if chm_path and _path_exists(chm_path):
             dm._load_chm_file(chm_path, aoi_poly)
         return dm
 
     def _load_dtm_file(self, path: str, aoi_poly: Polygon) -> None:
-        with rasterio.open(path) as src:
+        with _rio_env(path), rasterio.open(path) as src:
             aoi_proj = reproject_aoi_to_raster(aoi_poly, src.crs)
             arr, tr = rio_mask(src, [mapping(aoi_proj)], crop=True)
             self.dem_array = arr[0]
@@ -141,7 +169,7 @@ class DEMManager:
         self.bounds = (minx, miny, maxx, maxy)
 
     def _load_dsm_file(self, path: str, aoi_poly: Polygon) -> None:
-        with rasterio.open(path) as src:
+        with _rio_env(path), rasterio.open(path) as src:
             aoi_proj = reproject_aoi_to_raster(aoi_poly, src.crs)
             arr, tr = rio_mask(src, [mapping(aoi_proj)], crop=True)
             self.dsm_array = arr[0]
@@ -153,7 +181,7 @@ class DEMManager:
         )
 
     def _load_chm_file(self, path: str, aoi_poly: Polygon) -> None:
-        with rasterio.open(path) as src:
+        with _rio_env(path), rasterio.open(path) as src:
             aoi_proj = reproject_aoi_to_raster(aoi_poly, src.crs)
             arr, tr = rio_mask(src, [mapping(aoi_proj)], crop=True)
             self.chm_array = arr[0]

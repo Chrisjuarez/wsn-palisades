@@ -167,21 +167,27 @@ def page_explore():
 
 
 def page_live():
+    from shapely.geometry import box as shp_box
+
     from wsn_palisades.candidates import precompute_scenario_loky
+    from wsn_palisades.data_uris import (
+        PALISADES_BOUNDS,
+        PALISADES_CENTER,
+        chm_uri,
+        dsm_uri,
+        dtm_uri,
+    )
     from wsn_palisades.optimizers import greedy_select, random_select
     from wsn_palisades.params import SensorParams, SolarParams
     from wsn_palisades.surfaces import DEMManager, warp_surfaces_to_utm
 
-    st.title("Live AOI — quick FLAT/DEM run")
+    st.title("Live AOI — Palisades demo")
     st.caption(
-        "Draw a small AOI (≤2 km²), fetch DEM via OpenTopography, "
-        "and run greedy + random for a single K. DSM/CHM is unavailable for "
-        "arbitrary AOIs and is omitted here."
+        "Draw a small AOI (≤2 km²) **inside the white box** to run the placement "
+        "pipeline against the high-res Palisades lidar (1 m DTM/DSM/CHM, streamed "
+        "from S3). Pick a surface mode and watch greedy + random race against the "
+        "real terrain and canopy."
     )
-
-    api_key = os.environ.get("OPENTOPO_API_KEY")
-    if not api_key:
-        st.warning("`OPENTOPO_API_KEY` not set. Live DEM fetch will be skipped.")
 
     try:
         import folium
@@ -191,77 +197,126 @@ def page_live():
         st.error("Install `folium` and `streamlit-folium` to enable AOI drawing.")
         return
 
+    bounds_box = shp_box(*PALISADES_BOUNDS)
+    minx_p, miny_p, maxx_p, maxy_p = PALISADES_BOUNDS
+    bounds_polygon = [
+        (miny_p, minx_p), (miny_p, maxx_p),
+        (maxy_p, maxx_p), (maxy_p, minx_p), (miny_p, minx_p),
+    ]
+
     col_left, col_right = st.columns([3, 2])
     with col_left:
-        m = folium.Map(location=(34.06, -118.54), zoom_start=14,
-                       tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-                       attr="Esri")
-        Draw(export=False, draw_options={"polyline": False, "circlemarker": False, "marker": False}).add_to(m)
+        m = folium.Map(
+            location=PALISADES_CENTER, zoom_start=14,
+            tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+            attr="Esri",
+        )
+        folium.Polygon(
+            locations=bounds_polygon, color="#FFFFFF", weight=3, fill=False,
+            tooltip="Palisades raster coverage — draw inside this box",
+        ).add_to(m)
+        Draw(
+            export=False,
+            draw_options={"polyline": False, "circlemarker": False, "marker": False},
+        ).add_to(m)
         out = st_folium(m, width=700, height=520, returned_objects=["last_active_drawing"])
 
     drawn: Optional[dict] = out.get("last_active_drawing") if out else None
     aoi = None
     area_km2 = None
+    in_bounds = False
     if drawn and drawn.get("geometry"):
         aoi = shape(drawn["geometry"])
-        # quick lat/lon area approx
         from pyproj import Geod
         try:
             area, _ = Geod(ellps="WGS84").geometry_area_perimeter(aoi)
             area_km2 = abs(area) / 1e6
         except Exception:
             area_km2 = None
+        in_bounds = bounds_box.contains(aoi)
 
     with col_right:
         st.write("**Selected AOI**")
         if aoi is None:
-            st.info("Draw a polygon or rectangle on the map.")
+            st.info("Draw a polygon or rectangle inside the white box on the map.")
         else:
             st.write(f"Bounds: `{aoi.bounds}`")
             if area_km2 is not None:
                 st.write(f"Area: **{area_km2:.2f} km²**")
                 if area_km2 > 2.0:
                     st.error("AOI too large — keep it under 2 km² for a live run.")
+            if not in_bounds:
+                st.error("AOI must be fully inside the Palisades raster coverage (white box).")
 
+        mode_label = st.selectbox(
+            "Surface mode",
+            ("FLAT (no terrain)", "DEM (bare earth, DTM)", "DSM/CHM (surface + canopy)"),
+            index=2,
+            help="FLAT: no rasters fetched. DEM: streams DTM. DSM/CHM: streams DTM + DSM + CHM (most realistic).",
+        )
+        mode_key = {
+            "FLAT (no terrain)": "flat",
+            "DEM (bare earth, DTM)": "dem",
+            "DSM/CHM (surface + canopy)": "dsm_chm",
+        }[mode_label]
         K = st.number_input("K (sensors)", min_value=5, max_value=80, value=20)
-        run = st.button("Run", disabled=(aoi is None or (area_km2 is not None and area_km2 > 2.0)))
+
+        run_disabled = (
+            aoi is None
+            or (area_km2 is not None and area_km2 > 2.0)
+            or not in_bounds
+        )
+        run = st.button("Run", disabled=run_disabled)
 
     if not run or aoi is None:
         return
 
-    if not api_key:
-        st.error("Live DEM fetch requires `OPENTOPO_API_KEY` in `.env`.")
-        return
+    with st.spinner(f"Streaming {mode_key.upper()} from S3 and computing visibility..."):
+        # FLAT mode synthesizes a constant-elevation DEM over the AOI; no S3 fetch.
+        # DEM mode streams just the DTM.
+        # DSM/CHM streams DTM + DSM + CHM (each as a small AOI window over HTTP).
+        if mode_key == "flat":
+            import numpy as np
 
-    with st.spinner("Fetching DEM and computing visibility..."):
-        import requests
-        minx, miny, maxx, maxy = aoi.bounds
-        params = {
-            "demtype": "SRTMGL1",
-            "south": miny, "north": maxy, "west": minx, "east": maxx,
-            "outputFormat": "GTiff",
-            "API_Key": api_key,
-        }
-        r = requests.get("https://portal.opentopography.org/API/globaldem", params=params, timeout=60)
-        if r.status_code != 200:
-            st.error(f"OpenTopography fetch failed (HTTP {r.status_code}): {r.text[:200]}")
-            return
+            from rasterio.io import MemoryFile
+            from rasterio.transform import from_bounds
 
-        dmgr = DEMManager(r.content)
+            minx, miny, maxx, maxy = aoi.bounds
+            w_px, h_px = 256, 256
+            elev = np.zeros((h_px, w_px), dtype=np.float32)
+            tr = from_bounds(minx, miny, maxx, maxy, w_px, h_px)
+            with MemoryFile() as mem:
+                with mem.open(
+                    driver="GTiff", width=w_px, height=h_px, count=1,
+                    dtype="float32", crs="EPSG:4326", transform=tr, nodata=-9999,
+                ) as dst:
+                    dst.write(elev, 1)
+                dem_bytes = mem.read()
+            dmgr = DEMManager(dem_bytes)
+        else:
+            dsm_path = dsm_uri() if mode_key == "dsm_chm" else None
+            chm_path = chm_uri() if mode_key == "dsm_chm" else None
+            dmgr = DEMManager.from_files(
+                aoi_poly=aoi,
+                dtm_path=dtm_uri(),
+                dsm_path=dsm_path,
+                chm_path=chm_path,
+            )
+
         dmgr.calculate_slope_and_aspect()
         warp_surfaces_to_utm(dmgr, aoi, target_res_m=2.0)
 
         SP = SensorParams(R_m=300.0, az_step_deg=2, min_sep_m=200.0)
         solar = SolarParams()
         packs = precompute_scenario_loky(
-            aoi, dmgr, "dem", SP,
-            grid_size=20, cov_grid_size=40, n_jobs=4,
+            aoi, dmgr, mode_key if mode_key != "flat" else "dem", SP,
+            grid_size=20, cov_grid_size=40, n_jobs=2,
             solar_params=solar, verbose=False,
         )
         g = greedy_select(packs, int(K), SP)
         r_res = random_select(packs, int(K), SP)
 
-    st.success("Done.")
+    st.success(f"Done — mode `{mode_label}`, K={int(K)}.")
     cmp = pd.DataFrame(
         [
             {"optimizer": "Random", "coverage_pct": r_res["coverage_pct"], "gamma_mean": r_res["gamma_mean"], "d_mean_m": r_res["d_mean_m"], "solar_mean": r_res["solar_mean"]},
@@ -272,16 +327,23 @@ def page_live():
 
     # Render greedy placement on the map
     cands = packs["candidates"]
-    m2 = folium.Map(location=(aoi.centroid.y, aoi.centroid.x), zoom_start=15,
-                    tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-                    attr="Esri")
-    folium.Polygon(locations=[(c[1], c[0]) for c in aoi.exterior.coords], color="#FFFFFF", weight=3, fill=False).add_to(m2)
+    m2 = folium.Map(
+        location=(aoi.centroid.y, aoi.centroid.x), zoom_start=15,
+        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        attr="Esri",
+    )
+    folium.Polygon(
+        locations=[(c[1], c[0]) for c in aoi.exterior.coords],
+        color="#FFFFFF", weight=3, fill=False,
+    ).add_to(m2)
     for rank, idx in enumerate(g["idxs"], start=1):
         lon, lat = cands[int(idx)]
-        folium.CircleMarker(location=(lat, lon), radius=6, color="#F58518",
-                            fill=True, fill_color="#F58518", fill_opacity=0.9, weight=1,
-                            popup=f"Greedy rank {rank}").add_to(m2)
-    st.write("**Greedy placement**")
+        folium.CircleMarker(
+            location=(lat, lon), radius=6, color="#F58518",
+            fill=True, fill_color="#F58518", fill_opacity=0.9, weight=1,
+            popup=f"Greedy rank {rank}",
+        ).add_to(m2)
+    st.write(f"**Greedy placement — {mode_label}**")
     st_folium(m2, width=900, height=460, returned_objects=[])
 
 
