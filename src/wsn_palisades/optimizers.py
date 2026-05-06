@@ -18,7 +18,13 @@ import numpy as np
 from geopy.distance import geodesic
 from pymoo.algorithms.moo.nsga3 import NSGA3
 from pymoo.core.evaluator import Evaluator
-from pymoo.core.problem import Problem, StarmapParallelization
+from pymoo.core.problem import Problem
+
+# StarmapParallelization moved from pymoo.core.problem to pymoo.parallelization in 0.6.1.x
+try:
+    from pymoo.parallelization import StarmapParallelization  # pymoo >= 0.6.1
+except ImportError:  # pragma: no cover
+    from pymoo.core.problem import StarmapParallelization  # pymoo <= 0.6.0
 from pymoo.core.repair import Repair
 from pymoo.core.sampling import Sampling
 from pymoo.optimize import minimize
