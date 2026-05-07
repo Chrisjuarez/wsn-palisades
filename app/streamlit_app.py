@@ -178,6 +178,7 @@ def page_live():
     from shapely.geometry import box as shp_box
 
     from wsn_palisades.candidates import precompute_scenario_loky
+    from wsn_palisades.coverage import coverage_contour_lonlat
     from wsn_palisades.data_uris import (
         PALISADES_BOUNDS,
         PALISADES_CENTER,
@@ -359,18 +360,33 @@ def page_live():
                     use_threads=True, n_threads=2,
                 )
 
+        # Pre-compute coverage contours (irregular footprints from per-azimuth
+        # r_eff) for every idx selected by ANY optimizer. Storing only the
+        # selected ones keeps session_state small.
+        cands_arr = packs["candidates"]
+        dirpacks = packs["dirpacks"]
+        used_idxs = set()
+        for res in placements.values():
+            used_idxs.update(int(i) for i in res["idxs"])
+        contours_by_idx: dict[int, list[tuple[float, float]]] = {}
+        for i in used_idxs:
+            poly = coverage_contour_lonlat(cands_arr[i], dirpacks[i], SP)
+            contours_by_idx[int(i)] = [(float(lon), float(lat)) for lon, lat in poly]
+
         # Stash everything the renderer needs. Don't store packs (huge); only
-        # the candidate coordinates.
+        # the candidate coordinates and the polygons we'll draw.
         st.session_state["live_aoi_results"] = {
             "placements": placements,
             "candidates": [
-                (float(c[0]), float(c[1])) for c in packs["candidates"]
+                (float(c[0]), float(c[1])) for c in cands_arr
             ],
+            "contours_by_idx": contours_by_idx,
             "aoi_exterior": [
                 (float(x), float(y)) for x, y in aoi.exterior.coords
             ],
             "aoi_centroid": (float(aoi.centroid.y), float(aoi.centroid.x)),
             "mode_label": mode_label,
+            "mode_key": mode_key,
             "K": int(K),
             "range_m": float(SP.R_m),
         }
@@ -384,9 +400,11 @@ def page_live():
 
     placements = results["placements"]
     cands = results["candidates"]
+    contours_by_idx = results.get("contours_by_idx", {})
     aoi_exterior = results["aoi_exterior"]
     aoi_centroid = results["aoi_centroid"]
     mode_label_r = results["mode_label"]
+    mode_key_r = results.get("mode_key", "")
     K_r = results["K"]
     range_m = float(results.get("range_m", 300.0))
 
@@ -408,16 +426,21 @@ def page_live():
     ]
     st.dataframe(pd.DataFrame(rows), use_container_width=True)
 
-    # Map dropdown + range toggle -----------------------------------------
-    sel_col, range_col = st.columns([2, 1])
+    # Map dropdown + footprint toggle -------------------------------------
+    sel_col, fp_col = st.columns([2, 1])
     pick = sel_col.selectbox(
         "Show placement on map",
         list(placements.keys()),
         index=list(placements.keys()).index("Greedy") if "Greedy" in placements else 0,
         key="live_aoi_pick",
     )
-    show_range_live = range_col.checkbox(
-        f"Show range ({range_m:.0f} m)", value=True, key="live_aoi_show_range",
+    show_footprints = fp_col.checkbox(
+        "Show coverage footprints", value=True, key="live_aoi_show_footprints",
+        help=(
+            "FLAT mode draws perfect circles; DEM and DSM/CHM draw the "
+            "irregular footprints computed by the visibility ray-cast "
+            "(terrain + canopy attenuation per azimuth)."
+        ),
     )
     chosen = placements[pick]
 
@@ -440,19 +463,27 @@ def page_live():
         color="#FFFFFF", weight=3, fill=False,
     ).add_to(m2)
     for rank, idx in enumerate(chosen["idxs"], start=1):
-        lon, lat = cands[int(idx)]
-        if show_range_live:
-            folium.Circle(
-                location=(lat, lon), radius=range_m,
-                color=color, weight=1.5,
-                fill=True, fill_color=color, fill_opacity=0.10, opacity=0.55,
-            ).add_to(m2)
+        idx_i = int(idx)
+        lon, lat = cands[idx_i]
+        # Coverage footprint — irregular polygon for DEM/DSM-CHM, circle for FLAT
+        if show_footprints:
+            poly_lonlat = contours_by_idx.get(idx_i)
+            if poly_lonlat:
+                folium.Polygon(
+                    locations=[(la, lo) for lo, la in poly_lonlat],
+                    color=color, weight=1.5,
+                    fill=True, fill_color=color, fill_opacity=0.12, opacity=0.55,
+                ).add_to(m2)
+        # Sensor dot
         folium.CircleMarker(
-            location=(lat, lon), radius=6, color=color,
-            fill=True, fill_color=color, fill_opacity=0.9, weight=1,
-            popup=f"{pick} rank {rank} — range {range_m:.0f} m",
+            location=(lat, lon), radius=5, color=color,
+            fill=True, fill_color=color, fill_opacity=0.95, weight=1,
+            popup=f"{pick} rank {rank} — mode {mode_key_r.upper()} — R={range_m:.0f} m",
         ).add_to(m2)
-    st.write(f"**{pick} placement — {mode_label_r}**")
+    st.write(
+        f"**{pick} placement — {mode_label_r}** · footprints reflect per-azimuth "
+        f"r_eff (= R·√γ) computed from the live ray-cast."
+    )
     st_folium(m2, width=900, height=460, returned_objects=[], key="live_aoi_result_map")
 
 
