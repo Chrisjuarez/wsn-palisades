@@ -25,6 +25,7 @@ SAMPLE = REPO / "sample"
 
 DEFAULT_KSWEEP = RESULTS / "res_k_sweep_k=10to60_PalisadesFinal.pkl.gz"
 DEFAULT_CSV = RESULTS / "csv" / "df_k_sweep_k=10to60_PalisadesFinal.csv"
+DEFAULT_CONTOURS = RESULTS / "contours_palisades.pkl.gz"
 
 
 @st.cache_resource(show_spinner="Loading saved K-sweep...")
@@ -42,6 +43,18 @@ def cached_load_csv(path: str) -> pd.DataFrame:
 def cached_load_aoi(path: str):
     from wsn_palisades.candidates import load_aoi
     return load_aoi(path)
+
+
+@st.cache_resource(show_spinner=False)
+def cached_load_contours(path: str):
+    """Return per-scenario coverage contours, or None if the file isn't bundled."""
+    import gzip
+    import pickle
+    p = Path(path)
+    if not p.exists():
+        return None
+    with gzip.open(p, "rb") as f:
+        return pickle.load(f)
 
 
 # ============================================================================
@@ -120,12 +133,30 @@ def page_explore():
         1, int(K), int(K), 1,
     )
 
+    contours = cached_load_contours(str(DEFAULT_CONTOURS))
+    have_contours = bool(contours and scen in contours)
+
     cc1, cc2 = st.columns([1, 3])
-    show_range = cc1.checkbox("Show coverage range", value=True)
-    range_m = cc2.slider(
-        "Sensor range (m)", min_value=50, max_value=600, value=300, step=25,
-        help="Radius of the coverage halo drawn around each sensor.",
+    show_range = cc1.checkbox(
+        "Show coverage footprints" if have_contours else "Show coverage range",
+        value=True,
     )
+    if have_contours:
+        cc2.caption(
+            f"Footprints reflect per-azimuth r_eff (terrain + canopy "
+            f"attenuation) for `{scen}`. FLAT halos are perfect circles; "
+            f"DEM and DSM/CHM follow the visibility ray-cast."
+        )
+        range_m = 300.0  # ignored when contours are present
+    else:
+        range_m = cc2.slider(
+            "Sensor range (m)", min_value=50, max_value=600, value=300, step=25,
+            help=(
+                "Uniform-circle fallback. Run `python scripts/save_contours.py` "
+                "and commit `results/contours_palisades.pkl.gz` to get the real "
+                "irregular footprints."
+            ),
+        )
 
     tab_map, tab_pareto, tab_lines = st.tabs(["Map", "Pareto", "Metric vs K"])
 
@@ -137,6 +168,7 @@ def page_explore():
                 optimizer_key=opt_key, n_sensors=int(n_sensors),
                 grid_size=30,
                 range_m=float(range_m), show_range=bool(show_range),
+                contours=contours,
             )
             st_folium(fmap, width=900, height=560, returned_objects=[])
         except ImportError:

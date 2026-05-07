@@ -123,17 +123,24 @@ def build_folium_map(
     tiles: str = "Esri.WorldImagery",
     range_m: float | None = 300.0,
     show_range: bool = True,
+    contours: dict | None = None,
 ):
     """Return a folium.Map with the AOI polygon and selected sensor placements.
 
     Parameters
     ----------
     range_m
-        Sensor coverage radius in meters. When ``show_range`` is True, a
-        translucent ``folium.Circle`` of this radius is drawn around each
-        sensor dot. Pass ``None`` or set ``show_range=False`` to suppress.
+        Sensor coverage radius in meters. When ``show_range`` is True and no
+        ``contours`` are provided, a uniform ``folium.Circle`` of this radius
+        is drawn around each sensor (FLAT-style fallback). Pass ``None`` or
+        set ``show_range=False`` to suppress.
     show_range
-        Whether to draw the coverage halos.
+        Whether to draw the coverage halos / footprints.
+    contours
+        Optional ``{scenario: {idx: [(lon, lat), ...closed polygon]}}`` lookup.
+        When provided, the per-azimuth ``r_eff`` polygon for each sensor is
+        rendered instead of a uniform circle — irregular for DEM and DSM/CHM.
+        Build with ``scripts/save_contours.py``.
     """
     import folium
 
@@ -177,23 +184,46 @@ def build_folium_map(
 
     color = SCENARIO_COLORS.get(scenario, "#4C78A8")
     pretty = OPTIMIZER_PRETTY.get(optimizer_key, optimizer_key)
-    draw_halo = bool(show_range) and range_m is not None and range_m > 0
+    show_halo = bool(show_range)
+
+    # Per-scenario contour lookup (irregular footprints) takes precedence over
+    # the uniform circle fallback.
+    scenario_contours: dict[int, list] = {}
+    if isinstance(contours, dict):
+        # Try the exact scenario name and a few common aliases.
+        for key in (scenario, scenario.replace("/", ""), scenario.replace("/", "_")):
+            if key in contours:
+                scenario_contours = contours[key] or {}
+                break
 
     for rank, idx in enumerate(idxs, start=1):
         lon, lat = candidates[idx]
-        # Coverage halo (radius in meters)
-        if draw_halo:
-            folium.Circle(
-                location=(lat, lon),
-                radius=float(range_m),
-                color=color,
-                weight=1.5,
-                fill=True,
-                fill_color=color,
-                fill_opacity=0.10,
-                opacity=0.55,
-            ).add_to(m)
+        # Coverage footprint
+        if show_halo:
+            poly = scenario_contours.get(int(idx)) or scenario_contours.get(idx)
+            if poly:
+                folium.Polygon(
+                    locations=[(la, lo) for lo, la in poly],
+                    color=color, weight=1.5,
+                    fill=True, fill_color=color, fill_opacity=0.12, opacity=0.55,
+                ).add_to(m)
+            elif range_m is not None and range_m > 0:
+                folium.Circle(
+                    location=(lat, lon),
+                    radius=float(range_m),
+                    color=color,
+                    weight=1.5,
+                    fill=True,
+                    fill_color=color,
+                    fill_opacity=0.10,
+                    opacity=0.55,
+                ).add_to(m)
         # Centroid dot (radius in pixels)
+        popup_extra = ""
+        if show_halo and scenario_contours.get(int(idx)):
+            popup_extra = "<br>footprint: per-azimuth r_eff"
+        elif show_halo and range_m:
+            popup_extra = f"<br>range: {range_m:.0f} m (uniform fallback)"
         folium.CircleMarker(
             location=(lat, lon),
             radius=marker_radius,
@@ -205,8 +235,7 @@ def build_folium_map(
             popup=folium.Popup(
                 f"<b>{scenario} · {pretty} · K={K}</b><br>"
                 f"rank: <b>{rank}</b><br>candidate idx: <b>{idx}</b><br>"
-                f"({lon:.6f}, {lat:.6f})"
-                + (f"<br>range: {range_m:.0f} m" if draw_halo else ""),
+                f"({lon:.6f}, {lat:.6f})" + popup_extra,
                 max_width=260,
             ),
         ).add_to(m)
