@@ -121,8 +121,20 @@ def build_folium_map(
     n_sensors: int | None = None,
     marker_radius: int = 7,
     tiles: str = "Esri.WorldImagery",
+    range_m: float | None = 300.0,
+    show_range: bool = True,
 ):
-    """Return a folium.Map with the AOI polygon and selected sensor placements."""
+    """Return a folium.Map with the AOI polygon and selected sensor placements.
+
+    Parameters
+    ----------
+    range_m
+        Sensor coverage radius in meters. When ``show_range`` is True, a
+        translucent ``folium.Circle`` of this radius is drawn around each
+        sensor dot. Pass ``None`` or set ``show_range=False`` to suppress.
+    show_range
+        Whether to draw the coverage halos.
+    """
     import folium
 
     candidates = regenerate_coverage_grid(aoi_poly, grid_size=grid_size)
@@ -165,8 +177,23 @@ def build_folium_map(
 
     color = SCENARIO_COLORS.get(scenario, "#4C78A8")
     pretty = OPTIMIZER_PRETTY.get(optimizer_key, optimizer_key)
+    draw_halo = bool(show_range) and range_m is not None and range_m > 0
+
     for rank, idx in enumerate(idxs, start=1):
         lon, lat = candidates[idx]
+        # Coverage halo (radius in meters)
+        if draw_halo:
+            folium.Circle(
+                location=(lat, lon),
+                radius=float(range_m),
+                color=color,
+                weight=1.5,
+                fill=True,
+                fill_color=color,
+                fill_opacity=0.10,
+                opacity=0.55,
+            ).add_to(m)
+        # Centroid dot (radius in pixels)
         folium.CircleMarker(
             location=(lat, lon),
             radius=marker_radius,
@@ -178,7 +205,8 @@ def build_folium_map(
             popup=folium.Popup(
                 f"<b>{scenario} · {pretty} · K={K}</b><br>"
                 f"rank: <b>{rank}</b><br>candidate idx: <b>{idx}</b><br>"
-                f"({lon:.6f}, {lat:.6f})",
+                f"({lon:.6f}, {lat:.6f})"
+                + (f"<br>range: {range_m:.0f} m" if draw_halo else ""),
                 max_width=260,
             ),
         ).add_to(m)
