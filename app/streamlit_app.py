@@ -300,8 +300,8 @@ def page_live():
             st.write(f"Bounds: `{aoi.bounds}`")
             if area_km2 is not None:
                 st.write(f"Area: **{area_km2:.2f} km²**")
-                if area_km2 > 2.0:
-                    st.error("AOI too large — keep it under 2 km² for a live run.")
+                if area_km2 > 5.0:
+                    st.error("AOI too large — keep it under 5 km² for a live run.")
             if not in_bounds:
                 st.error("AOI must be fully inside the Palisades raster coverage (white box).")
 
@@ -330,7 +330,7 @@ def page_live():
 
         run_disabled = (
             aoi is None
-            or (area_km2 is not None and area_km2 > 2.0)
+            or (area_km2 is not None and area_km2 > 5.0)
             or not in_bounds
         )
         run = st.button("Run", disabled=run_disabled)
