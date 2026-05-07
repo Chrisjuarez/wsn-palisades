@@ -36,15 +36,14 @@ def chm_uri() -> str:
     return _uri("palisadesCHM.tif")
 
 
-# Palisades coverage bounds (lon_min, lat_min, lon_max, lat_max) in WGS84.
-# Drawn AOIs in the Live page must fall inside this box.
+# Palisades raster coverage bounds (lon_min, lat_min, lon_max, lat_max) in WGS84.
+# Taken directly from the DSM/CHM/DTM rasters (CRS:EPSG:6340, 0.5 m resolution,
+# 21761 x 23453 px). Drawn AOIs in the Live page must fall inside this box.
 PALISADES_BOUNDS: Final[tuple[float, float, float, float]] = (
-    -118.5550, 34.0450, -118.5100, 34.0750,
+    -118.584253, 34.033582, -118.464458, 34.140766,
 )
-PALISADES_CENTER: Final[tuple[float, float]] = (
-    (PALISADES_BOUNDS[1] + PALISADES_BOUNDS[3]) / 2,  # lat
-    (PALISADES_BOUNDS[0] + PALISADES_BOUNDS[2]) / 2,  # lon
-)
+# (lat, lon) for folium initial centering — uses the raster's natural center.
+PALISADES_CENTER: Final[tuple[float, float]] = (34.087174, -118.524355)
 
 # The Palisades rasters are tagged NAD83(2011) / UTM zone 11N (EPSG:6340).
 # Older PROJ databases (e.g. Streamlit Cloud's) lose this on read and surface
