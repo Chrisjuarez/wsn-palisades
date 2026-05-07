@@ -128,9 +128,13 @@ def page_explore():
     opt_label = col3.selectbox("Optimizer", list(opt_label_to_key.keys()))
     opt_key = opt_label_to_key.get(opt_label)
 
+    # Key tied to (scenario, K) so the slider resets to K whenever the
+    # user changes K — otherwise it stays at a stale value (like 21 when
+    # K=60) and the map looks like a tiny clustered subset.
     n_sensors = st.slider(
         "Number of sensors to render",
         1, int(K), int(K), 1,
+        key=f"explore_n_sensors_{scen}_{int(K)}",
     )
 
     contours = cached_load_contours(str(DEFAULT_CONTOURS))
@@ -170,7 +174,14 @@ def page_explore():
                 range_m=float(range_m), show_range=bool(show_range),
                 contours=contours,
             )
-            st_folium(fmap, width=900, height=560, returned_objects=[])
+            # Key tied to inputs so st_folium rebuilds the widget when any
+            # control changes — otherwise it caches the previous zoom/pan
+            # and the AOI looks shrunken or off-center after slider edits.
+            map_key = f"explore_{scen}_{int(K)}_{opt_key}_{int(n_sensors)}_{int(show_range)}"
+            st_folium(
+                fmap, width=900, height=560,
+                returned_objects=[], key=map_key,
+            )
         except ImportError:
             st.warning("Install `streamlit-folium` to enable interactive maps.")
 
