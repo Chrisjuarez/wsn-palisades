@@ -5,7 +5,7 @@ Run locally:
 
 The Explore Results page is the MVP path — it reads bundled `.pkl.gz`/`.csv`
 files in ``results/`` and needs no S3 / API access. The Live AOI page needs
-``OPENTOPO_API_KEY`` and is restricted to small AOIs (≤10 km²).
+``OPENTOPO_API_KEY`` and is restricted to small AOIs (≤25 km²).
 """
 
 from __future__ import annotations
@@ -240,7 +240,7 @@ def page_live():
 
     st.title("Live AOI — Palisades demo")
     st.caption(
-        "Draw a small AOI (≤10 km²) **inside the white box** to run the placement "
+        "Draw an AOI (≤25 km²) **inside the white box** to run the placement "
         "pipeline against the high-res Palisades lidar (0.5 m DTM/DSM/CHM, streamed "
         "from S3). Pick a surface mode and watch greedy + random race against the "
         "real terrain and canopy. The white box matches the actual raster footprint "
@@ -301,8 +301,8 @@ def page_live():
             st.write(f"Bounds: `{aoi.bounds}`")
             if area_km2 is not None:
                 st.write(f"Area: **{area_km2:.2f} km²**")
-                if area_km2 > 10.0:
-                    st.error("AOI too large — keep it under 10 km² for a live run.")
+                if area_km2 > 25.0:
+                    st.error("AOI too large — keep it under 25 km² for a live run.")
             if not in_bounds:
                 st.error("AOI must be fully inside the Palisades raster coverage (white box).")
 
@@ -331,7 +331,7 @@ def page_live():
 
         run_disabled = (
             aoi is None
-            or (area_km2 is not None and area_km2 > 10.0)
+            or (area_km2 is not None and area_km2 > 25.0)
             or not in_bounds
         )
         run = st.button("Run", disabled=run_disabled)
