@@ -1,17 +1,17 @@
 {
   "type": "Feature",
   "properties": {
-    "name": "Pacific Palisades sample AOI",
-    "notes": "Approximate ~5 km^2 box used for the Palisades canonical run."
+    "name": "Pacific Palisades canonical AOI (30 km²)",
+    "notes": "6.0 km x 5.0 km rectangle centered at (lon=-118.5240, lat=34.0870), inside the EPSG:6340 raster footprint W:-118.5843 E:-118.4645 S:34.0336 N:34.1408. Used for the canonical K-sweep results bundled in results/."
   },
   "geometry": {
     "type": "Polygon",
     "coordinates": [[
-      [-118.555, 34.045],
-      [-118.510, 34.045],
-      [-118.510, 34.075],
-      [-118.555, 34.075],
-      [-118.555, 34.045]
+      [-118.5566, 34.0645],
+      [-118.4914, 34.0645],
+      [-118.4914, 34.1095],
+      [-118.5566, 34.1095],
+      [-118.5566, 34.0645]
     ]]
   }
 }
